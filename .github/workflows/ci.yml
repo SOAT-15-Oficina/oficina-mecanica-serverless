@@ -1,6 +1,11 @@
 name: CI
 
 on:
+  # O bring-up do repositorio de infraestrutura dispara este workflow por
+  # `gh workflow run` depois de criar a camada efemera, entao ele precisa
+  # aceitar disparo manual -- e o job de deploy precisa reconhecer esse
+  # evento, nao so `push`.
+  workflow_dispatch:
   push:
     branches: [main]
     paths-ignore: ["**/*.md", "docs/adr/**"]
@@ -134,7 +139,7 @@ jobs:
             -Dsonar.qualitygate.timeout=300
 
   deploy:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [lint, test]
     runs-on: ubuntu-latest
     environment: production
