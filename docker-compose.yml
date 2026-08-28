@@ -1,0 +1,45 @@
+# Sobe a funcao isolada no Lambda Runtime Interface Emulator, com um Postgres
+# que carrega apenas a tabela `users`.
+#
+#   docker compose up --build
+#   curl -s localhost:9000/2015-03-31/functions/function/invocations \
+#     -d '{"routeKey":"POST /auth/login","body":"{\"username\":\"admin\",\"password\":\"admin123\"}"}'
+#
+# O schema real e propriedade do oficina-mecanica-monolith; o bootstrap.sql
+# abaixo e uma reducao para teste local. Para o fluxo completo com o schema
+# verdadeiro, use o docker-compose.local.yml do oficina-mecanica-infrastructure.
+services:
+  lambda:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    ports:
+      - "9000:8080"
+    environment:
+      DATABASE_HOST: db
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: techchallenge-db
+      DATABASE_USER: techchallenge
+      DATABASE_PASSWORD: password
+      # Sem DATABASE_SECRET_ID/JWT_SECRET_ID o config le do ambiente e nao
+      # chama o Secrets Manager -- nao ha AWS aqui.
+      JWT_SECRET_KEY: local-dev-secret
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: techchallenge
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: techchallenge-db
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./tests/bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U techchallenge -d techchallenge-db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

@@ -1,0 +1,12 @@
+apis:
+  auth:
+    root: docs/openapi.yaml
+
+extends:
+  - recommended
+
+rules:
+  operation-operationId: error
+  no-unused-components: error
+  operation-4xx-response: off
+  info-license-strict: off

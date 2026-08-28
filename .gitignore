@@ -1,0 +1,19 @@
+# Binarios e artefato de deploy
+bootstrap
+dist/
+*.zip
+
+# Testes e cobertura
+*.test
+*.out
+.scannerwork/
+
+vendor/
+go.work
+
+# IDEs
+.vscode
+.idea
+
+# Ambiente
+.env

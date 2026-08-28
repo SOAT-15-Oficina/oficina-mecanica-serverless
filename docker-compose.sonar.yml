@@ -1,0 +1,38 @@
+# SonarQube self-hosted para uso local. O CI sobe uma instancia equivalente como
+# service container efemero -- ver .github/workflows/ci.yml.
+#
+#   docker compose -f docker-compose.sonar.yml up -d sonarqube
+#   go test ./... -coverprofile=coverage.out
+#   docker compose -f docker-compose.sonar.yml run --rm sonar-scanner
+services:
+  sonarqube:
+    image: sonarqube:lts-community
+    container_name: oficina-serverless-sonarqube
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    ports:
+      - "9001:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+
+  sonar-scanner:
+    image: sonarsource/sonar-scanner-cli:latest
+    profiles:
+      - scanner
+    depends_on:
+      - sonarqube
+    environment:
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_TOKEN: ${SONAR_TOKEN:-}
+    volumes:
+      - .:/usr/src
+      - sonar_scanner_cache:/opt/sonar-scanner/.sonar/cache
+    working_dir: /usr/src
+
+volumes:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  sonar_scanner_cache:

@@ -1,0 +1,169 @@
+openapi: 3.0.3
+info:
+  title: Oficina Mecanica - Autenticacao (Lambda)
+  description: |
+    Funcao serverless de autenticacao da plataforma. Emite o JWT que o
+    oficina-mecanica-monolith valida.
+
+    Este contrato cobre APENAS `/auth/*`. As demais rotas da API (ordens de
+    servico, catalogos, usuarios) tem contrato proprio em
+    `oficina-mecanica-monolith/docs/swagger.yaml`. A agregacao das duas acontece
+    no roteamento do API Gateway, nao num arquivo.
+  version: 1.0.0
+  license:
+    name: Uso academico
+
+servers:
+  - url: /api
+    description: Atras do CloudFront/API Gateway
+  - url: /
+    description: Lambda RIE local
+
+# Ambos os endpoints sao a porta de entrada da autenticacao: por definicao nao
+# exigem token. A declaracao explicita evita que a ausencia pareca esquecimento.
+security: []
+
+tags:
+  - name: Auth
+    description: Autenticacao e cadastro de usuarios
+
+paths:
+  /auth/login:
+    post:
+      operationId: postAuthLogin
+      tags: [Auth]
+      summary: Login e obtencao de token JWT
+      description: |
+        O token e HS256, expira em 24h e carrega os claims `user` e `role`.
+        Usuario inexistente e senha incorreta retornam a mesma resposta, para o
+        endpoint nao servir de enumerador de usuarios.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Token JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Credenciais invalidas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /auth/register:
+    post:
+      operationId: postAuthRegister
+      tags: [Auth]
+      summary: Registrar novo usuario
+      description: |
+        Cria a credencial na tabela `users`, cujo schema e de propriedade do
+        oficina-mecanica-monolith.
+
+        ATENCAO: este endpoint e publico e aceita o campo `role`, o que permite
+        a qualquer chamador criar um usuario `admin`. E o comportamento herdado
+        do monolito, mantido de forma deliberada para que o split fosse
+        estritamente estrutural. Ver "Riscos conhecidos" no README.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Usuario criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: Username ja existe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  responses:
+    BadRequest:
+      description: Requisicao invalida
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalServerError:
+      description: Erro interno
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: joao
+        password:
+          type: string
+          format: password
+          example: senha123
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    RegisterRequest:
+      type: object
+      required: [username, password, role]
+      properties:
+        username:
+          type: string
+          example: joao
+        password:
+          type: string
+          format: password
+          example: senha123
+        role:
+          type: string
+          enum: [admin, employee]
+          example: employee
+
+    User:
+      type: object
+      description: O hash de senha nunca e serializado.
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, employee]
