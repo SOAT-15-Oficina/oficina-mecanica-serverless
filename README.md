@@ -123,18 +123,37 @@ da função no SSM:
 
 | Parâmetro | Uso |
 |---|---|
-| `/oficina-mecanica/prod/auth_lambda_name` | alvo do `update-function-code` |
+| `/oficina-mecanica/<ambiente>/auth_lambda_name` | alvo do `update-function-code` |
 
 A função é **criada pelo Terraform** com um zip placeholder e
 `lifecycle.ignore_changes` no código: o **artefato** é propriedade deste
 pipeline; **VPC, memória, timeout, role e variáveis de ambiente** são
 propriedade do repositório de infraestrutura.
 
+### Dois ambientes
+
+A **branch** escolhe o destino: `hml` publica em homologação, `main` em produção.
+Não há input de ambiente em lugar nenhum deste repositório — o `ref` já carrega a
+informação, e um input separado poderia contradizê-lo.
+
+| | homologação | produção |
+|---|---|---|
+| Branch | `hml` | `main` |
+| GitHub Environment | `homolog` | `production` |
+| Prefixo no SSM | `/oficina-mecanica/homolog` | `/oficina-mecanica/prod` |
+
+Por isso `AWS_DEPLOY_ROLE_ARN` é secret de **GitHub Environment**, não de
+repositório: os dois ambientes usam o mesmo nome de secret e apenas o escopo do
+Environment os separa. A trust policy da role repete a regra do lado da AWS — um
+push em `hml` não obtém credencial de produção.
+
+Arquitetura completa dos dois ambientes: `oficina-mecanica-infrastructure`.
+
 ### Secrets e variables necessários
 
 | Nome | Tipo | Conteúdo |
 |---|---|---|
-| `AWS_DEPLOY_ROLE_ARN` | secret | role assumida por OIDC (`lambda:UpdateFunctionCode` + SSM) |
+| `AWS_DEPLOY_ROLE_ARN` | secret de **Environment** (`production` e `homolog`) | role assumida por OIDC (`lambda:UpdateFunctionCode` + SSM) |
 | `CI_DATABASE_PASSWORD` | secret | senha do Postgres do job de teste |
 | `AWS_REGION` | variable | `sa-east-1` |
 
