@@ -1,16 +1,24 @@
 name: CI
 
+# Dois ambientes, uma regra: a BRANCH escolhe o destino.
+#
+#   hml  -> homologacao (/oficina-mecanica/homolog, GitHub Environment homolog)
+#   main -> producao    (/oficina-mecanica/prod,    GitHub Environment production)
+#
+# Nao existe input de ambiente aqui de proposito. O ref ja carrega a informacao,
+# e um input separado poderia contradize-lo -- fazendo deploy do codigo de uma
+# branch no ambiente da outra. O bring-up do repositorio de infraestrutura
+# dispara este workflow com `--ref hml` ou `--ref main`, conforme o ambiente que
+# acabou de subir.
 on:
-  # O bring-up do repositorio de infraestrutura dispara este workflow por
-  # `gh workflow run` depois de criar a camada efemera, entao ele precisa
-  # aceitar disparo manual -- e o job de deploy precisa reconhecer esse
-  # evento, nao so `push`.
+  # Necessario para esse disparo do bring-up -- e por isso o job de deploy
+  # reconhece `workflow_dispatch`, nao so `push`.
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, hml]
     paths-ignore: ["**/*.md", "docs/adr/**"]
   pull_request:
-    branches: [main]
+    branches: [main, hml]
     paths-ignore: ["**/*.md", "docs/adr/**"]
 
 concurrency:
@@ -23,7 +31,6 @@ permissions:
 
 env:
   GO_VERSION: "1.26"
-  SSM_PREFIX: /oficina-mecanica/prod
 
 jobs:
   lint:
@@ -142,9 +149,25 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [lint, test]
     runs-on: ubuntu-latest
-    environment: production
+    environment: ${{ github.ref_name == 'hml' && 'homolog' || 'production' }}
     steps:
       - uses: actions/checkout@v4
+
+      # A branch decide o ambiente, e com ele o prefixo do SSM. O `environment:`
+      # do job repete a mesma regra em expressao; este `case` e o que falha alto
+      # se alguem acrescentar uma branch ao gatilho e esquecer deste mapa.
+      - name: Resolve target environment
+        run: |
+          case "$GITHUB_REF_NAME" in
+            main) ENVIRONMENT=prod ;;
+            hml)  ENVIRONMENT=homolog ;;
+            *)
+              echo "branch $GITHUB_REF_NAME nao mapeia para nenhum ambiente"
+              exit 1
+              ;;
+          esac
+          echo "Deploy no ambiente '$ENVIRONMENT'"
+          echo "SSM_PREFIX=/oficina-mecanica/$ENVIRONMENT" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v5
         with:
