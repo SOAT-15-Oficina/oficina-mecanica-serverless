@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/auth"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/domain"
+	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/observability"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -45,6 +47,16 @@ func NewAuthService(repo UserRepository, jwtSecretKey string) AuthService {
 	return &authService{repo: repo, jwtSecretKey: jwtSecretKey}
 }
 
+// A FALHA E REGISTRADA ONDE ELA ACONTECE, e nao no handler.
+//
+// E aqui que se sabe a diferenca entre "o banco nao respondeu" e "a senha esta
+// errada" -- o handler ve as duas como um erro a traduzir em status HTTP. O
+// `@integration` do painel de erros de integracao depende dessa distincao.
+//
+// O logger sai SEMPRE do contexto (ADR-0011): e o unico que carrega o
+// `request_id` da invocacao. Fora de uma invocacao ele cai no default, que tem
+// os campos do processo mas nao os da requisicao.
+
 func (s *authService) Register(ctx context.Context, username, password string, role domain.UserRole) (*domain.User, error) {
 	if username == "" {
 		return nil, NewValidationError("username is required")
@@ -56,31 +68,76 @@ func (s *authService) Register(ctx context.Context, username, password string, r
 		return nil, NewValidationError("invalid role: must be 'admin' or 'employee'")
 	}
 
+	logger := observability.FromContext(ctx)
+
 	hash, err := hashPassword(password)
 	if err != nil {
+		// Sem `integration`: falha de CPU local, nao de dependencia externa.
+		// Marca-la como `rds` poria uma falha nossa no painel do banco.
+		logger.ErrorContext(ctx, "hash password", observability.Err(err))
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	return s.repo.Create(ctx, &domain.User{
+	user, err := s.repo.Create(ctx, &domain.User{
 		Username:     username,
 		PasswordHash: hash,
 		Role:         role,
 	})
+	if err != nil {
+		// Username tomado e resposta de negocio (409), nao incidente: quem
+		// alertaria sobre isso estaria alertando sobre um usuario digitando.
+		if !errors.Is(err, ErrUsernameTaken) {
+			logger.ErrorContext(ctx, "create user",
+				observability.Integration(observability.IntegrationRDS),
+				observability.Err(err))
+		}
+		return nil, err
+	}
+
+	logger.InfoContext(ctx, "user registered",
+		slog.String(observability.KeyUser, user.Username),
+		slog.String(observability.KeyRole, string(user.Role)))
+
+	return user, nil
 }
 
 func (s *authService) Login(ctx context.Context, username, password string) (string, error) {
+	logger := observability.FromContext(ctx)
+
 	user, err := s.repo.FindByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Mesma resposta de senha errada: nao revela quais usuarios existem.
+			// O log distingue as duas -- ele e interno e e onde a investigacao
+			// acontece --, mas a resposta HTTP nao.
+			logger.WarnContext(ctx, "login failed: unknown user",
+				observability.Event(observability.EventLoginFailed),
+				slog.String(observability.KeyUser, username))
 			return "", ErrInvalidCredentials
 		}
+
+		logger.ErrorContext(ctx, "find user by username",
+			observability.Integration(observability.IntegrationRDS),
+			observability.Err(err))
 		return "", err
 	}
 
 	if err := verifyPassword(password, user.PasswordHash); err != nil {
+		logger.WarnContext(ctx, "login failed: wrong password",
+			observability.Event(observability.EventLoginFailed),
+			slog.String(observability.KeyUser, username))
 		return "", ErrInvalidCredentials
 	}
 
-	return auth.GenerateToken(user.Username, string(user.Role), s.jwtSecretKey)
+	token, err := auth.GenerateToken(user.Username, string(user.Role), s.jwtSecretKey)
+	if err != nil {
+		logger.ErrorContext(ctx, "generate token", observability.Err(err))
+		return "", err
+	}
+
+	logger.InfoContext(ctx, "login succeeded",
+		slog.String(observability.KeyUser, user.Username),
+		slog.String(observability.KeyRole, string(user.Role)))
+
+	return token, nil
 }

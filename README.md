@@ -134,12 +134,45 @@ internal/
   config/            env + Secrets Manager (com fallback local)
   domain/            User e UserRole
   handler/           roteamento por RouteKey, tradução de erro → HTTP
+  observability/     slog JSON e a taxonomia de campos da ADR-0011
   repository/        adaptador pgx da tabela users
   service/           argon2 (hash/verify) + Register/Login
 tools/gentoken/      gerador do fixture de contrato
 docs/openapi.yaml    contrato — apenas /auth/*
 tests/bootstrap.sql  recorte de `users` para local e CI
 ```
+
+## Observabilidade
+
+Toda linha de log é JSON, com os mesmos nomes de campo do monolito. Quem define
+esses nomes é a [ADR-0011][adr11] no repositório de infraestrutura, e não este
+repositório: eles são lidos literalmente pelas métricas de log e pelos alertas
+do Datadog (`persistent/datadog_metrics.tf`, `persistent/datadog_monitors.tf`).
+Renomear um campo aqui compila, passa nos testes e esvazia um painel em
+silêncio — por isso os nomes vivem em constantes, em `internal/observability`, e
+há teste sobre eles.
+
+| Campo | De onde vem |
+|---|---|
+| `service` | `DD_SERVICE` (o Terraform injeta `auth-lambda`) |
+| `env` | `DD_ENV` — sem ela, `local`, e o handler vira texto legível |
+| `version` | SHA do commit, gravado no binário pelo linker no CI |
+| `request_id` | `RequestContext.RequestID` do evento |
+| `route`, `method`, `status`, `duration_ms` | linha de acesso, uma por invocação |
+| `event` | evento de domínio — aqui, `auth.login_failed` |
+| `integration` | dependência externa, em `level=ERROR` — aqui, `rds` |
+| `error` | `err.Error()` |
+
+**`request_id` não é gerado: é herdado.** `RequestContext.RequestID` é o mesmo
+valor que o API Gateway grava como `$context.requestId` no próprio access log.
+É por isso que uma consulta por `@request_id` no Datadog devolve as duas
+pontas — a linha da borda e a linha de dentro da função. O UUID gerado só
+aparece em invocação direta, onde não há gateway.
+
+**Nunca entram em log:** senha, hash, o token emitido e o segredo do JWT. O
+`username` de um login recusado entra — é o que torna a tentativa investigável.
+
+[adr11]: https://github.com/SOAT-15-Oficina/oficina-mecanica-infrastructure/blob/main/docs/adr/0011-logs-estruturados-com-correlacao.md
 
 ## Rodando local
 
