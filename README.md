@@ -14,9 +14,8 @@ valida.
 Esta função **lê e escreve na tabela `users` do mesmo RDS** que o monolito usa.
 
 Isso é deliberado: `users.id` é alvo de chave estrangeira em
-`work_orders.opened_by_user_id`, `work_orders.assigned_technician_id` e
-`work_order_status_history.changed_by_user_id`. Dar um banco próprio a esta
-função quebraria três FKs e o fluxo de abertura de OS.
+`work_orders.opened_by_user_id` e `work_orders.assigned_technician_id`. Dar um
+banco próprio a esta função quebraria as duas FKs e o fluxo de abertura de OS.
 
 | | |
 |---|---|
@@ -46,6 +45,85 @@ cp internal/auth/testdata/token.golden \
 ```
 
 Regenere e copie **no mesmo PR**.
+
+## Arquitetura deste repositório
+
+```mermaid
+flowchart TB
+    GW["API Gateway<br/>POST /auth/login<br/>POST /auth/register"] -->|AWS_PROXY| LMB
+
+    subgraph LMB [Lambda auth — Go, provided.al2023]
+        direction TB
+        INIT["cmd/lambda/main<br/>init do container: config, segredos, pool"]
+        H["handler<br/>roteia pela RouteKey, decodifica corpo"]
+        SVC["service<br/>Register / Login"]
+        CRED["service/credential<br/>argon2id: hash e verificação"]
+        AUTH["auth<br/>GenerateToken HS256"]
+        REPO["repository<br/>users via pgx"]
+    end
+
+    INIT -.uma vez por container.-> H
+    H --> SVC
+    SVC --> CRED
+    SVC --> REPO --> DB[(RDS PostgreSQL<br/>tabela users)]
+    SVC --> AUTH
+    INIT --> SM[Secrets Manager<br/>JWT + credencial do RDS]
+```
+
+Duas rotas numa única função: duas Lambdas dobrariam infraestrutura e cold
+starts sem ganho. O `RouteKey` do evento decide qual caminho seguir.
+
+Tudo que é caro acontece no **init do container**, não por invocação: leitura dos
+segredos e abertura do pool. Em container reutilizado, a invocação já encontra
+tudo pronto. `MaxConns` por container é baixo de propósito — concorrência de
+Lambda multiplica pools, e o teto real é o `max_connections` do RDS.
+
+**Fluxo de deploy deste repositório:**
+
+```mermaid
+flowchart LR
+    PR[PR] --> L[lint: actionlint + redocly]
+    PR --> T[test: go test + Postgres]
+    PR --> Q[quality: SonarQube efêmero]
+    PUSH[push em hml/main] --> B["build: GOOS=linux, binário `bootstrap`"]
+    B --> U[aws lambda update-function-code]
+    U --> W[wait function-updated]
+    W --> I[invoke de fumaça]
+```
+
+## Contrato da API
+
+| | |
+|---|---|
+| OpenAPI (fonte) | [`docs/openapi.yaml`](docs/openapi.yaml) |
+| Rotas | `POST /auth/login`, `POST /auth/register` |
+| Em um ambiente no ar | `<URL_PUBLICA>/api/auth/login` |
+
+O contrato cobre **apenas** `/auth/*`. O resto da API tem contrato próprio no
+[`oficina-mecanica-monolith`](https://github.com/SOAT-15-Oficina/oficina-mecanica-monolith/blob/main/docs/swagger.yaml).
+Os dois são disjuntos por desenho: nenhum documenta rota do outro.
+
+```bash
+# exemplo
+curl -X POST "$BASE/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"..."}'
+# → {"token":"eyJ..."}
+```
+
+## Deploy ativo
+
+O ambiente é **efêmero**. A URL pública é estável entre ciclos e fica no SSM:
+
+```bash
+aws ssm get-parameter --name /oficina-mecanica/prod/public_base_url \
+  --query Parameter.Value --output text
+```
+
+| Ambiente | URL |
+|---|---|
+| Produção | `/oficina-mecanica/prod/public_base_url` |
+| Homologação | `/oficina-mecanica/homolog/public_base_url` |
 
 ## Estrutura
 
@@ -167,14 +245,3 @@ invocação): em container reutilizado já estão em memória.
 O pool tem teto baixo de conexões por container, porque concorrência de Lambda
 multiplica pools. Se o volume de login crescer, o próximo passo é **RDS Proxy**,
 não aumentar esse número.
-
-## Riscos conhecidos
-
-**`POST /auth/register` é público e aceita o campo `role`.** Qualquer chamador
-pode criar um usuário `admin`. Esse é o comportamento herdado do monolito,
-mantido de forma deliberada para que o split fosse estritamente estrutural — e
-agora exposto numa URL pública na internet.
-
-Corrigir significa exigir um token de admin antes de registrar (a função já tem
-`ParseToken`) e semear o primeiro admin por uma migration de bootstrap. Está
-registrado no contrato OpenAPI e aqui para não ser esquecido.
