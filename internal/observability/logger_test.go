@@ -12,12 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Estes testes protegem um contrato que nenhum outro teste protege: os nomes
-// dos campos sao consumidos por consultas do Datadog que vivem em outro
-// repositorio (persistent/datadog_metrics.tf). Renomear `event` para
-// `event_name` compilaria, passaria em todo o resto da suite e esvaziaria
-// quatro paineis sem uma linha vermelha em lugar nenhum.
-
 func decodeLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 	t.Helper()
 	var out map[string]any
@@ -50,7 +44,6 @@ func TestNew_FallsBackToTheDefaultServiceName(t *testing.T) {
 	assert.Equal(t, DefaultService, decodeLine(t, &buf)[KeyService])
 }
 
-// Sem DD_ENV nao ha Datadog do outro lado -- e um humano lendo um terminal.
 func TestNew_UsesTextHandlerLocally(t *testing.T) {
 	t.Setenv("DD_ENV", "")
 
@@ -97,8 +90,6 @@ func TestFromContext_ReturnsTheLoggerThatWasStored(t *testing.T) {
 	assert.Equal(t, "abc-123", decodeLine(t, &buf)[KeyRequestID])
 }
 
-// O caso que importa: um contexto sem logger nao pode derrubar o processo nem
-// engolir a linha.
 func TestFromContext_FallsBackToTheDefault(t *testing.T) {
 	assert.NotNil(t, FromContext(context.Background()))
 	assert.Equal(t, slog.Default(), FromContext(context.Background()))

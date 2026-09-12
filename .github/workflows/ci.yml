@@ -176,13 +176,6 @@ jobs:
 
       # provided.al2023 espera um executavel chamado `bootstrap`.
       # arm64 = Graviton: mais barato por ms de execucao.
-      #
-      # O -X grava o SHA do commit no binario, e e de la que sai o campo
-      # `version` de toda linha de log (internal/observability). Vem do LINKER e
-      # nao de uma variavel de ambiente da funcao: variavel de ambiente pode ser
-      # trocada sem trocar o codigo, e o campo passaria a mentir sobre o que
-      # esta rodando -- que e exatamente a pergunta que ele existe para
-      # responder quando uma regressao aparece no painel.
       - name: Build lambda artifact
         env:
           VERSION_PKG: github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/observability

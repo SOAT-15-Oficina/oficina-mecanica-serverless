@@ -47,16 +47,6 @@ func NewAuthService(repo UserRepository, jwtSecretKey string) AuthService {
 	return &authService{repo: repo, jwtSecretKey: jwtSecretKey}
 }
 
-// A FALHA E REGISTRADA ONDE ELA ACONTECE, e nao no handler.
-//
-// E aqui que se sabe a diferenca entre "o banco nao respondeu" e "a senha esta
-// errada" -- o handler ve as duas como um erro a traduzir em status HTTP. O
-// `@integration` do painel de erros de integracao depende dessa distincao.
-//
-// O logger sai SEMPRE do contexto (ADR-0011): e o unico que carrega o
-// `request_id` da invocacao. Fora de uma invocacao ele cai no default, que tem
-// os campos do processo mas nao os da requisicao.
-
 func (s *authService) Register(ctx context.Context, username, password string, role domain.UserRole) (*domain.User, error) {
 	if username == "" {
 		return nil, NewValidationError("username is required")
@@ -72,8 +62,6 @@ func (s *authService) Register(ctx context.Context, username, password string, r
 
 	hash, err := hashPassword(password)
 	if err != nil {
-		// Sem `integration`: falha de CPU local, nao de dependencia externa.
-		// Marca-la como `rds` poria uma falha nossa no painel do banco.
 		logger.ErrorContext(ctx, "hash password", observability.Err(err))
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
@@ -84,8 +72,6 @@ func (s *authService) Register(ctx context.Context, username, password string, r
 		Role:         role,
 	})
 	if err != nil {
-		// Username tomado e resposta de negocio (409), nao incidente: quem
-		// alertaria sobre isso estaria alertando sobre um usuario digitando.
 		if !errors.Is(err, ErrUsernameTaken) {
 			logger.ErrorContext(ctx, "create user",
 				observability.Integration(observability.IntegrationRDS),
@@ -108,8 +94,6 @@ func (s *authService) Login(ctx context.Context, username, password string) (str
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Mesma resposta de senha errada: nao revela quais usuarios existem.
-			// O log distingue as duas -- ele e interno e e onde a investigacao
-			// acontece --, mas a resposta HTTP nao.
 			logger.WarnContext(ctx, "login failed: unknown user",
 				observability.Event(observability.EventLoginFailed),
 				slog.String(observability.KeyUser, username))

@@ -37,22 +37,11 @@ func NewAuthHandler(svc service.AuthService) *AuthHandler {
 
 // Handle roteia pela RouteKey do API Gateway. Sao duas rotas numa unica funcao:
 // duas Lambdas separadas dobrariam infraestrutura e cold starts sem ganho.
-//
-// E tambem o unico lugar onde a observabilidade da invocacao e montada: e o
-// equivalente ao middleware do monolito (ADR-0011, secao 2), no formato que
-// uma Lambda permite.
 func (h *AuthHandler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	start := time.Now()
 
 	method, route := methodAndRoute(req)
 
-	// O `requestId` do evento E o `$context.requestId` do access log do API
-	// Gateway (ADR-0011, secao 5). Nao ha header a ler nem UUID a gerar: os dois
-	// lados ja nascem com o mesmo valor, que e o que faz uma consulta por
-	// `@request_id` devolver a linha da borda e a linha de dentro da funcao.
-	//
-	// O UUID e so para invocacao direta (o smoke check do CI, um `lambda
-	// invoke` manual), onde nao ha gateway nenhum.
 	requestID := req.RequestContext.RequestID
 	if requestID == "" {
 		requestID = uuid.NewString()
@@ -67,9 +56,6 @@ func (h *AuthHandler) Handle(ctx context.Context, req events.APIGatewayV2HTTPReq
 
 	resp, err := h.dispatch(ctx, req)
 
-	// A linha de acesso: e dela que sai `oficina.http_request_duration`, o
-	// painel de latencia por rota. Uma por invocacao, sempre -- inclusive nas
-	// que falharam, que sao as que interessam.
 	logger.LogAttrs(ctx, accessLevel(resp.StatusCode), "request",
 		slog.Int(observability.KeyStatus, resp.StatusCode),
 		slog.Int(observability.KeyHTTPStatusCode, resp.StatusCode),
@@ -101,8 +87,6 @@ func (h *AuthHandler) login(ctx context.Context, req events.APIGatewayV2HTTPRequ
 		if errors.Is(err, service.ErrInvalidCredentials) {
 			return jsonResponse(ctx, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		}
-		// O `error` e o `integration` desta falha ja sairam no servico, junto do
-		// que ele sabe e este nivel nao sabe (se veio do banco ou do hash).
 		return jsonResponse(ctx, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 	}
 
@@ -131,12 +115,6 @@ func (h *AuthHandler) register(ctx context.Context, req events.APIGatewayV2HTTPR
 	return jsonResponse(ctx, http.StatusCreated, user)
 }
 
-// methodAndRoute separa "POST /auth/login" em suas duas metades.
-//
-// O `route` guarda so o caminho, e nao a RouteKey inteira, para casar com o
-// `@route` que o monolito emite -- la ele e o padrao da rota do Fiber. Um
-// painel de latencia por rota que misturasse "POST /auth/login" com
-// "/work-orders/:id" teria duas convencoes no mesmo eixo.
 func methodAndRoute(req events.APIGatewayV2HTTPRequest) (method, route string) {
 	method, route = req.RequestContext.HTTP.Method, req.RawPath
 
@@ -149,10 +127,6 @@ func methodAndRoute(req events.APIGatewayV2HTTPRequest) (method, route string) {
 	return method, route
 }
 
-// accessLevel traduz o status HTTP para o nivel da linha de acesso.
-//
-// E o que permite alertar sobre `status:error` sem alertar sobre todo trafego:
-// uma credencial recusada (401) e um aviso, um erro interno (500) nao e.
 func accessLevel(status int) slog.Level {
 	switch {
 	case status >= http.StatusInternalServerError:
@@ -164,9 +138,6 @@ func accessLevel(status int) slog.Level {
 	}
 }
 
-// millisSince devolve a duracao em milissegundos com casas decimais. Inteiro
-// arredondaria para 0 a maior parte das invocacoes em container quente, e uma
-// distribuicao de zeros nao responde nada sobre latencia.
 func millisSince(start time.Time) float64 {
 	return float64(time.Since(start).Microseconds()) / 1000
 }

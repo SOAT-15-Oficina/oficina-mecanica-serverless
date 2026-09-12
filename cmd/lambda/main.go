@@ -21,10 +21,6 @@ import (
 )
 
 func main() {
-	// Antes de tudo: uma falha de inicializacao tambem precisa sair como JSON
-	// estruturado. Este e o log que aparece quando a funcao nao sobe -- se ele
-	// for texto livre, e justamente o incidente mais dificil que fica de fora
-	// da consulta.
 	logger := observability.Setup()
 
 	// Tudo aqui roda uma vez por container, nao por invocacao: em container
@@ -39,8 +35,6 @@ func main() {
 
 	pool, err := newPool(ctx, cfg)
 	if err != nil {
-		// A unica dependencia externa da inicializacao: sem isto, "a Lambda nao
-		// sobe" e indistinguivel de "o banco nao respondeu" no painel.
 		fatal(ctx, logger, "failed to connect to database", err, observability.Integration(observability.IntegrationRDS))
 	}
 
@@ -51,9 +45,6 @@ func main() {
 	lambda.Start(authHandler.Handle)
 }
 
-// fatal registra e derruba o processo. `os.Exit` e nao `log.Fatalf` porque o
-// que interessa aqui e a linha estruturada -- e `log.Fatalf` escreveria texto
-// livre no meio de um log que o resto do sistema le como JSON.
 func fatal(ctx context.Context, logger *slog.Logger, msg string, err error, attrs ...slog.Attr) {
 	logger.LogAttrs(ctx, slog.LevelError, msg, append(attrs, observability.Err(err))...)
 	os.Exit(1)

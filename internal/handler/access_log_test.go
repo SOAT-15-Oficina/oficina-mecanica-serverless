@@ -13,11 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A linha de acesso e a fonte de `oficina.http_request_duration`, o painel de
-// latencia por rota (persistent/datadog_metrics.tf). Os nomes dos campos aqui
-// nao sao detalhe de implementacao: sao o contrato que aquele Terraform
-// consulta.
-
 func handleWithLog(t *testing.T, req events.APIGatewayV2HTTPRequest, svc *stubAuthService) map[string]any {
 	t.Helper()
 	t.Setenv("DD_ENV", "prod")
@@ -51,9 +46,6 @@ func TestHandle_EmitsAccessLine(t *testing.T) {
 	assert.Equal(t, "INFO", line["level"])
 }
 
-// O `requestId` do evento E o `$context.requestId` do access log do API
-// Gateway. Perder essa igualdade e perder a correlacao borda <-> aplicacao
-// inteira, sem nada quebrar visivelmente.
 func TestHandle_ReusesTheGatewayRequestID(t *testing.T) {
 	req := request("POST /auth/login", `{"username":"a","password":"b"}`)
 	req.RequestContext.RequestID = "id-vindo-do-gateway"
@@ -63,17 +55,12 @@ func TestHandle_ReusesTheGatewayRequestID(t *testing.T) {
 	assert.Equal(t, "id-vindo-do-gateway", line[observability.KeyRequestID])
 }
 
-// Invocacao direta (o smoke check do CI, um `lambda invoke` na mao) nao passa
-// pelo gateway e nao tem requestId. A linha continua correlacionavel consigo
-// mesma.
 func TestHandle_GeneratesARequestIDWhenTheEventHasNone(t *testing.T) {
 	line := handleWithLog(t, request("POST /auth/login", `{"username":"a","password":"b"}`), &stubAuthService{token: "tok"})
 
 	assert.NotEmpty(t, line[observability.KeyRequestID])
 }
 
-// 4xx e aviso, 5xx e erro: e o que permite alertar sobre `status:error` sem
-// alertar sobre todo usuario que erra a senha.
 func TestHandle_AccessLineLevelFollowsTheStatus(t *testing.T) {
 	line := handleWithLog(t, request("GET /rota-inexistente", ""), &stubAuthService{})
 
