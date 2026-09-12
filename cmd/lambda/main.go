@@ -7,11 +7,13 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/config"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/handler"
+	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/observability"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/repository"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/service"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -19,6 +21,8 @@ import (
 )
 
 func main() {
+	logger := observability.Setup()
+
 	// Tudo aqui roda uma vez por container, nao por invocacao: em container
 	// reutilizado o pool e o segredo ja estao prontos.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -26,12 +30,12 @@ func main() {
 
 	cfg, err := config.Load(ctx)
 	if err != nil {
-		log.Fatalf("failed to load configuration: %v", err)
+		fatal(ctx, logger, "failed to load configuration", err)
 	}
 
 	pool, err := newPool(ctx, cfg)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		fatal(ctx, logger, "failed to connect to database", err, observability.Integration(observability.IntegrationRDS))
 	}
 
 	authHandler := handler.NewAuthHandler(
@@ -39,6 +43,11 @@ func main() {
 	)
 
 	lambda.Start(authHandler.Handle)
+}
+
+func fatal(ctx context.Context, logger *slog.Logger, msg string, err error, attrs ...slog.Attr) {
+	logger.LogAttrs(ctx, slog.LevelError, msg, append(attrs, observability.Err(err))...)
+	os.Exit(1)
 }
 
 func newPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {

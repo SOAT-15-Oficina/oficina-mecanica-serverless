@@ -177,10 +177,14 @@ jobs:
       # provided.al2023 espera um executavel chamado `bootstrap`.
       # arm64 = Graviton: mais barato por ms de execucao.
       - name: Build lambda artifact
+        env:
+          VERSION_PKG: github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/observability
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-            go build -trimpath -ldflags="-s -w" -o dist/bootstrap ./cmd/lambda
+            go build -trimpath \
+              -ldflags="-s -w -X ${VERSION_PKG}.version=${GITHUB_SHA}" \
+              -o dist/bootstrap ./cmd/lambda
           (cd dist && zip -q -X function.zip bootstrap)
 
       - uses: aws-actions/configure-aws-credentials@v4
