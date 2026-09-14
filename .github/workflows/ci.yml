@@ -135,7 +135,11 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "SONAR_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
+      # `continue-on-error` de proposito: um Quality Gate reprovado precisa
+      # chegar ao passo de metricas -- sao elas que explicam a reprovacao.
+      # Quem reprova o job e o passo `Enforce quality gate`, no fim.
       - name: Scan and wait for Quality Gate
+        continue-on-error: true
         run: |
           docker run --rm --network host \
             -e SONAR_HOST_URL=http://localhost:9000 \
@@ -144,6 +148,46 @@ jobs:
             sonarsource/sonar-scanner-cli:latest \
             -Dsonar.qualitygate.wait=true \
             -Dsonar.qualitygate.timeout=300
+
+      - name: Publish metrics
+        if: always()
+        run: |
+          KEY="$(sed -n 's/^sonar\.projectKey=//p' sonar-project.properties)"
+          api() { curl -sf -u "${SONAR_TOKEN}:" "http://localhost:9000/$1"; }
+
+          GATE="$(api "api/qualitygates/project_status?projectKey=${KEY}")"
+          STATUS="$(jq -r '.projectStatus.status' <<<"$GATE")"
+          echo "QUALITY_GATE_STATUS=$STATUS" >> "$GITHUB_ENV"
+
+          KEYS=coverage,duplicated_lines_density,bugs,vulnerabilities,security_hotspots,code_smells,ncloc,reliability_rating,security_rating,sqale_rating
+          MEASURES="$(api "api/measures/component?component=${KEY}&metricKeys=${KEYS}")"
+
+          {
+            if [ "$STATUS" = OK ]; then
+              echo "## SonarQube -- Quality Gate: APROVADO :white_check_mark:"
+            else
+              echo "## SonarQube -- Quality Gate: ${STATUS} :x:"
+            fi
+            echo
+            echo "| Condicao | Valor | Limite | |"
+            echo "|---|---|---|---|"
+            jq -r '.projectStatus.conditions[]
+                   | "| \(.metricKey) | \(.actualValue // "-") | \(.comparator) \(.errorThreshold) | \(if .status == "OK" then ":white_check_mark:" else ":x:" end) |"' <<<"$GATE"
+            echo
+            echo "### Metricas"
+            echo
+            echo "| Metrica | Valor |"
+            echo "|---|---|"
+            jq -r '.component.measures[] | "| \(.metric) | \(.value) |"' <<<"$MEASURES" | sort
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Este passo e metade do bloqueio de merge; a outra metade e `quality`
+      # estar na lista de required status checks da protecao de main/hml.
+      - name: Enforce quality gate
+        if: always()
+        run: |
+          echo "Quality Gate: ${QUALITY_GATE_STATUS:-INDISPONIVEL}"
+          test "${QUALITY_GATE_STATUS:-}" = OK
 
   deploy:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
