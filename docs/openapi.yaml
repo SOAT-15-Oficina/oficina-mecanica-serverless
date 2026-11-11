@@ -3,11 +3,12 @@ info:
   title: Oficina Mecanica - Autenticacao (Lambda)
   description: |
     Funcao serverless de autenticacao da plataforma. Emite o JWT que o
-    oficina-mecanica-monolith valida.
+    OS Service, o Billing e o Execution validam. A verificacao da senha e o
+    cadastro do usuario sao feitos pelo OS Service, em /internal/*.
 
     Este contrato cobre APENAS `/auth/*`. As demais rotas da API (ordens de
     servico, catalogos, usuarios) tem contrato proprio em
-    `oficina-mecanica-monolith/docs/swagger.yaml`. A agregacao das duas acontece
+    o `docs/swagger.yaml` de cada servico. A agregacao das duas acontece
     no roteamento do API Gateway, nao num arquivo.
   version: 1.0.0
   license:
@@ -67,8 +68,8 @@ paths:
       tags: [Auth]
       summary: Registrar novo usuario
       description: |
-        Cria a credencial na tabela `users`, cujo schema e de propriedade do
-        oficina-mecanica-monolith.
+        Cria o usuario no OS Service (`POST /internal/users`), dono da tabela
+        `users`.
 
         ATENCAO: este endpoint e publico e aceita o campo `role`, o que permite
         a qualquer chamador criar um usuario `admin`. E o comportamento herdado

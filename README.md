@@ -2,8 +2,10 @@
 
 Função de autenticação da plataforma. Uma Lambda em Go que serve
 `POST /auth/login` e `POST /auth/register` atrás do API Gateway, e emite o JWT
-que o [`oficina-mecanica-monolith`](https://github.com/SOAT-15-Oficina/oficina-mecanica-monolith)
-valida.
+que o OS Service, o Billing e o Execution validam. A senha não é verificada
+aqui: a função pergunta ao
+[`oficina-mecanica-os-service`](https://github.com/SOAT-15-Oficina/oficina-mecanica-os-service),
+dono da tabela `users`, e só emite o token.
 
 > **Visão de arquitetura do sistema completo** vive em
 > [`oficina-mecanica-infrastructure`](https://github.com/SOAT-15-Oficina/oficina-mecanica-infrastructure).
@@ -11,26 +13,37 @@ valida.
 
 ## Fronteiras
 
-Esta função **lê e escreve na tabela `users` do mesmo RDS** que o monolito usa.
+Na Fase 4 cada serviço tem banco próprio e ninguém lê o banco de outro
+([RFC-0006, seção 8](https://github.com/SOAT-15-Oficina/oficina-mecanica-infrastructure/blob/main/docs/rfc/0006-microsservicos-e-saga.md)).
+Por isso esta função **não tem banco e não abre conexão com nenhum**: ela chama
+duas rotas internas do OS Service pelo ALB interno.
 
-Isso é deliberado: `users.id` é alvo de chave estrangeira em
-`work_orders.opened_by_user_id` e `work_orders.assigned_technician_id`. Dar um
-banco próprio a esta função quebraria as duas FKs e o fluxo de abertura de OS.
+| Rota do painel | Chamada ao OS Service | Respostas do OS que importam |
+|---|---|---|
+| `POST /auth/login` | `POST /internal/credentials/verify` `{"username","password"}` | 200 `{"id","username","role"}` → emite o JWT; 401 → 401 |
+| `POST /auth/register` | `POST /internal/users` `{"username","password","role"}` | 201 → 201; 409 → 409; 400 → 400 com a mesma mensagem |
+
+As duas chamadas levam o header **`X-Service-Token`** e o `X-Request-Id` da
+requisição do gateway. O token é um segredo próprio,
+`oficina-mecanica/<ambiente>/internal-service-token`, criado pela camada
+persistente da plataforma e lido pelos dois lados: esta função e o OS Service.
+É distinto do segredo do JWT de propósito: vazar um não dá o outro.
 
 | | |
 |---|---|
-| **Dono do schema** | `oficina-mecanica-monolith` (`database/migrations`) |
-| **Migrations rodadas aqui** | nenhuma — esta função depende do schema já existir |
-| **CRUD administrativo `/users`** | fica no monolito |
-| **Criação da função, VPC, IAM, API Gateway** | `oficina-mecanica-infrastructure` |
+| **Dono de `users` e do hash de senha (argon2id)** | `oficina-mecanica-os-service` |
+| **CRUD administrativo `/users`** | OS Service |
+| **Criação da função, VPC, IAM, API Gateway, segredo do token** | `oficina-mecanica-infrastructure` |
+| **O que fica aqui** | rotas `/auth/*`, validação da entrada do cadastro e emissão do JWT |
 
-`tests/bootstrap.sql` é um **recorte** de `users` para uso local e no CI, não a
-fonte da verdade. Se a definição da tabela mudar no monolito, atualize-o.
+Qualquer resposta inesperada do OS Service (5xx, timeout, corpo inválido) vira
+**500**, nunca 401: credencial recusada e serviço fora do ar precisam continuar
+distinguíveis.
 
 ## Contrato do token
 
 Uma cópia de `AppClaims`/`GenerateToken`/`ParseToken` vive em `internal/auth/`
-aqui **e** no monolito. São ~40 linhas — não valem um módulo Go compartilhado
+aqui **e** em cada serviço que valida o token. São ~40 linhas — não valem um módulo Go compartilhado
 (que exigiria `GOPRIVATE` e deploy key nos dois CIs) nem um quinto repositório.
 
 O que impede as cópias de divergirem é o fixture `internal/auth/testdata/token.golden`:
@@ -41,7 +54,7 @@ assinatura quebra o build dos dois, em vez de virar 401 em produção.
 ```bash
 go run ./tools/gentoken > internal/auth/testdata/token.golden
 cp internal/auth/testdata/token.golden \
-   ../oficina-mecanica-monolith/internal/auth/testdata/token.golden
+   ../oficina-mecanica-os-service/internal/auth/testdata/token.golden
 ```
 
 Regenere e copie **no mesmo PR**.
@@ -54,36 +67,33 @@ flowchart TB
 
     subgraph LMB [Lambda auth — Go, provided.al2023]
         direction TB
-        INIT["cmd/lambda/main<br/>init do container: config, segredos, pool"]
+        INIT["cmd/lambda/main<br/>init do container: config e segredos"]
         H["handler<br/>roteia pela RouteKey, decodifica corpo"]
         SVC["service<br/>Register / Login"]
-        CRED["service/credential<br/>argon2id: hash e verificação"]
+        OSC["osclient<br/>HTTP + X-Service-Token"]
         AUTH["auth<br/>GenerateToken HS256"]
-        REPO["repository<br/>users via pgx"]
     end
 
     INIT -.uma vez por container.-> H
     H --> SVC
-    SVC --> CRED
-    SVC --> REPO --> DB[(RDS PostgreSQL<br/>tabela users)]
+    SVC --> OSC -->|"POST /internal/*<br/>porta 80"| ALB[ALB interno] --> OS[OS Service<br/>tabela users]
     SVC --> AUTH
-    INIT --> SM[Secrets Manager<br/>JWT + credencial do RDS]
+    INIT --> SM[Secrets Manager<br/>JWT + token de serviço]
 ```
 
 Duas rotas numa única função: duas Lambdas dobrariam infraestrutura e cold
 starts sem ganho. O `RouteKey` do evento decide qual caminho seguir.
 
-Tudo que é caro acontece no **init do container**, não por invocação: leitura dos
-segredos e abertura do pool. Em container reutilizado, a invocação já encontra
-tudo pronto. `MaxConns` por container é baixo de propósito — concorrência de
-Lambda multiplica pools, e o teto real é o `max_connections` do RDS.
+Os segredos são lidos no **init do container**, não por invocação. O cliente
+HTTP do OS Service tem timeout de 5s (`OS_INTERNAL_TIMEOUT`), bem abaixo dos 15s
+da função.
 
 **Fluxo de deploy deste repositório:**
 
 ```mermaid
 flowchart LR
     PR[PR] --> L[lint: actionlint + redocly]
-    PR --> T[test: go test + Postgres]
+    PR --> T["test: go vet + go test -race, cobertura >= 80%"]
     PR --> Q[quality: SonarQube efêmero]
     PUSH[push em hml/main] --> B["build: GOOS=linux, binário `bootstrap`"]
     B --> U[aws lambda update-function-code]
@@ -100,7 +110,7 @@ flowchart LR
 | Em um ambiente no ar | `<URL_PUBLICA>/api/auth/login` |
 
 O contrato cobre **apenas** `/auth/*`. O resto da API tem contrato próprio no
-[`oficina-mecanica-monolith`](https://github.com/SOAT-15-Oficina/oficina-mecanica-monolith/blob/main/docs/swagger.yaml).
+`docs/swagger.yaml` de cada serviço.
 Os dois são disjuntos por desenho: nenhum documenta rota do outro.
 
 ```bash
@@ -113,7 +123,8 @@ curl -X POST "$BASE/api/auth/login" \
 
 ## Deploy ativo
 
-O ambiente é **efêmero**. A URL pública é estável entre ciclos e fica no SSM:
+O ambiente é **efêmero**. A URL pública da API (CloudFront + `/api`) é estável
+entre ciclos e fica no SSM:
 
 ```bash
 aws ssm get-parameter --name /oficina-mecanica/prod/public_base_url \
@@ -128,23 +139,22 @@ aws ssm get-parameter --name /oficina-mecanica/prod/public_base_url \
 ## Estrutura
 
 ```
-cmd/lambda/          bootstrap: config, pool, handler, lambda.Start
+cmd/lambda/          bootstrap: config, cliente do OS Service, handler, lambda.Start
 internal/
   auth/              AppClaims + Generate/ParseToken + fixture de contrato
   config/            env + Secrets Manager (com fallback local)
   domain/            User e UserRole
   handler/           roteamento por RouteKey, tradução de erro → HTTP
   observability/     slog JSON e a taxonomia de campos da ADR-0011
-  repository/        adaptador pgx da tabela users
-  service/           argon2 (hash/verify) + Register/Login
+  osclient/          cliente HTTP de /internal/credentials/verify e /internal/users
+  service/           Register/Login e emissão do JWT
 tools/gentoken/      gerador do fixture de contrato
 docs/openapi.yaml    contrato — apenas /auth/*
-tests/bootstrap.sql  recorte de `users` para local e CI
 ```
 
 ## Observabilidade
 
-Toda linha de log é JSON, com os mesmos nomes de campo do monolito. Quem define
+Toda linha de log é JSON, com os mesmos nomes de campo dos serviços. Quem define
 esses nomes é a [ADR-0011][adr11] no repositório de infraestrutura, e não este
 repositório: eles são lidos literalmente pelas métricas de log e pelos alertas
 do Datadog (`persistent/datadog_metrics.tf`, `persistent/datadog_monitors.tf`).
@@ -160,7 +170,7 @@ há teste sobre eles.
 | `request_id` | `RequestContext.RequestID` do evento |
 | `route`, `method`, `status`, `duration_ms` | linha de acesso, uma por invocação |
 | `event` | evento de domínio — aqui, `auth.login_failed` |
-| `integration` | dependência externa, em `level=ERROR` — aqui, `rds` |
+| `integration` | dependência externa, em `level=ERROR` — aqui, `os-service` |
 | `error` | `err.Error()` |
 
 **`request_id` não é gerado: é herdado.** `RequestContext.RequestID` é o mesmo
@@ -169,7 +179,8 @@ valor que o API Gateway grava como `$context.requestId` no próprio access log.
 pontas — a linha da borda e a linha de dentro da função. O UUID gerado só
 aparece em invocação direta, onde não há gateway.
 
-**Nunca entram em log:** senha, hash, o token emitido e o segredo do JWT. O
+**Nunca entram em log:** senha, o token emitido, o segredo do JWT e o token de
+serviço. O
 `username` de um login recusado entra — é o que torna a tentativa investigável.
 
 [adr11]: https://github.com/SOAT-15-Oficina/oficina-mecanica-infrastructure/blob/main/docs/adr/0011-logs-estruturados-com-correlacao.md
@@ -177,12 +188,22 @@ aparece em invocação direta, onde não há gateway.
 ## Rodando local
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
 
-Sobe a função no **Lambda Runtime Interface Emulator** com um Postgres ao lado.
-Sem `DATABASE_SECRET_ID`/`JWT_SECRET_ID` no ambiente, o config lê direto das
-variáveis e **não chama o Secrets Manager** — não há AWS envolvida.
+Sobe a função no **Lambda Runtime Interface Emulator**. Ela precisa de um OS
+Service respondendo em `OS_INTERNAL_BASE_URL` (padrão
+`http://host.docker.internal:8081`, o compose do próprio OS Service) com o mesmo
+`INTERNAL_SERVICE_TOKEN`. Sem `JWT_SECRET_ID`/`INTERNAL_SERVICE_TOKEN_SECRET_ID`
+o config lê direto das variáveis e **não chama o Secrets Manager**.
+
+| Variável | Local | AWS |
+|---|---|---|
+| `OS_INTERNAL_BASE_URL` | URL do OS Service | `http://<alb_dns_name>`, injetada pelo Terraform |
+| `INTERNAL_SERVICE_TOKEN` / `INTERNAL_SERVICE_TOKEN_SECRET_ID` | valor | ARN do segredo |
+| `JWT_SECRET_KEY` / `JWT_SECRET_ID` | valor | ARN do segredo |
+| `OS_INTERNAL_TIMEOUT` | opcional, padrão `5s` | idem |
 
 ```bash
 curl -s localhost:9000/2015-03-31/functions/function/invocations -d '{
@@ -191,20 +212,20 @@ curl -s localhost:9000/2015-03-31/functions/function/invocations -d '{
 }'
 ```
 
-Para o fluxo completo (front + Lambda + monolito atrás de um nginx que replica o
-roteamento do CloudFront), use `docker-compose.local.yml` no repositório de
-infraestrutura.
+Para o fluxo completo (painel, Lambda e os três serviços atrás de um nginx que
+replica o roteamento do CloudFront), use `local/docker-compose.local.yml` no
+repositório de infraestrutura.
 
 ## Testes
 
 ```bash
-go test ./... -short                      # unitários, sem banco
-TEST_DATABASE_URL=postgres://... go test ./...   # inclui integração
-go test ./... -coverprofile=coverage.out
+go vet ./...
+go test -race ./... -coverprofile=coverage.out
 ```
 
-Os testes de integração de `internal/repository` pulam sozinhos quando
-`TEST_DATABASE_URL` não está definida.
+Nenhum teste precisa de banco ou de rede: o cliente do OS Service é testado
+contra um `httptest.Server`. O CI barra cobertura abaixo de **80%** (sem `cmd/` e
+`tools/`, a mesma exclusão do SonarQube).
 
 ## Qualidade
 
@@ -265,16 +286,16 @@ Arquitetura completa dos dois ambientes: `oficina-mecanica-infrastructure`.
 | Nome | Tipo | Conteúdo |
 |---|---|---|
 | `AWS_DEPLOY_ROLE_ARN` | secret de **Environment** (`production` e `homolog`) | role assumida por OIDC (`lambda:UpdateFunctionCode` + SSM) |
-| `CI_DATABASE_PASSWORD` | secret | senha do Postgres do job de teste |
 | `AWS_REGION` | variable | `sa-east-1` |
 
 ## Rede e segredos em produção
 
-A função roda **dentro da VPC, em subnets privadas**, com SG próprio liberado no
-SG do RDS na 5432 — o banco nunca é exposto à internet. Credencial do RDS e
-chave JWT vêm do **Secrets Manager**, lidos uma vez por container (não por
-invocação): em container reutilizado já estão em memória.
+A função roda **dentro da VPC, em subnets privadas**. O SG dela só sai para o
+ALB interno na porta 80 (onde o OS Service atende `/internal/*`) e para HTTPS
+(Secrets Manager, pelo NAT); o SG do ALB aceita a função na porta 80. Chave JWT
+e token de serviço vêm do **Secrets Manager**, lidos uma vez por container (não
+por invocação): em container reutilizado já estão em memória.
 
-O pool tem teto baixo de conexões por container, porque concorrência de Lambda
-multiplica pools. Se o volume de login crescer, o próximo passo é **RDS Proxy**,
-não aumentar esse número.
+As rotas `/internal/*` não são publicadas no API Gateway como rotas próprias,
+mas o `$default` do gateway leva ao mesmo ALB; quem as protege é o
+`X-Service-Token`, comparado em tempo constante pelo OS Service.
