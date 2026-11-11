@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/domain"
+	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/observability"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/service"
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,7 +85,7 @@ func TestLogin_InvalidCredentialsIs401(t *testing.T) {
 // Falha interna nao pode virar 401, e a mensagem nao pode vazar detalhe do
 // banco para quem chama.
 func TestLogin_InternalErrorIs500AndDoesNotLeak(t *testing.T) {
-	h := NewAuthHandler(&stubAuthService{loginErr: errors.New("dial tcp 10.0.3.14:5432: connection refused")})
+	h := NewAuthHandler(&stubAuthService{loginErr: errors.New("dial tcp 10.0.3.14:80: connection refused")})
 
 	resp, err := h.Handle(context.Background(), request("POST /auth/login", `{"username":"a","password":"b"}`))
 
@@ -107,7 +107,7 @@ func TestLogin_MalformedJSONIs400(t *testing.T) {
 // --- register ---
 
 func TestRegister_Success(t *testing.T) {
-	id := uuid.New()
+	id := "0193a6f0-7c1e-7d4a-9f0e-5b2c3d4e5f60"
 	h := NewAuthHandler(&stubAuthService{user: &domain.User{ID: id, Username: "alice", Role: domain.UserRoleAdmin}})
 
 	resp, err := h.Handle(context.Background(), request("POST /auth/register", `{"username":"alice","password":"p","role":"admin"}`))
@@ -115,21 +115,8 @@ func TestRegister_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 201, resp.StatusCode)
 	body := decode(t, resp)
-	assert.Equal(t, id.String(), body["id"])
+	assert.Equal(t, id, body["id"])
 	assert.Equal(t, "alice", body["username"])
-}
-
-// O hash nunca pode sair na resposta: domain.User marca o campo com json:"-".
-func TestRegister_ResponseOmitsPasswordHash(t *testing.T) {
-	h := NewAuthHandler(&stubAuthService{user: &domain.User{
-		ID: uuid.New(), Username: "alice", PasswordHash: "$argon2id$segredo", Role: domain.UserRoleAdmin,
-	}})
-
-	resp, err := h.Handle(context.Background(), request("POST /auth/register", `{"username":"alice","password":"p","role":"admin"}`))
-
-	require.NoError(t, err)
-	assert.NotContains(t, resp.Body, "argon2id")
-	assert.NotContains(t, resp.Body, "password_hash")
 }
 
 func TestRegister_ValidationErrorIs400WithMessage(t *testing.T) {
@@ -180,4 +167,26 @@ func TestHandle_InvalidBase64BodyIs400(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 400, resp.StatusCode)
+}
+
+type requestIDProbe struct {
+	stubAuthService
+	seen string
+}
+
+func (s *requestIDProbe) Login(ctx context.Context, _ string, _ string) (string, error) {
+	s.seen = observability.RequestID(ctx)
+	return "tok", nil
+}
+
+func TestHandle_PropagatesGatewayRequestID(t *testing.T) {
+	probe := &requestIDProbe{}
+	h := NewAuthHandler(probe)
+	req := request("POST /auth/login", `{"username":"a","password":"b"}`)
+	req.RequestContext.RequestID = "req-123"
+
+	_, err := h.Handle(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.Equal(t, "req-123", probe.seen)
 }

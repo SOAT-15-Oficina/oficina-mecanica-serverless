@@ -60,12 +60,12 @@ func TestEventAndIntegrationUseTheContractedKeys(t *testing.T) {
 	var buf bytes.Buffer
 	New(&buf).LogAttrs(context.Background(), slog.LevelError, "boom",
 		Event(EventLoginFailed),
-		Integration(IntegrationRDS),
+		Integration(IntegrationOSService),
 		Err(errors.New("connection refused")))
 
 	line := decodeLine(t, &buf)
 	assert.Equal(t, "auth.login_failed", line[KeyEvent])
-	assert.Equal(t, "rds", line[KeyIntegration])
+	assert.Equal(t, "os-service", line[KeyIntegration])
 	assert.Equal(t, "connection refused", line[KeyError])
 	assert.Equal(t, "ERROR", line["level"])
 }
