@@ -3,13 +3,11 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/auth"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/domain"
 	"github.com/SOAT-15-Oficina/oficina-mecanica-serverless/internal/observability"
-	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -17,20 +15,15 @@ var (
 	ErrUsernameTaken      = errors.New("username already taken")
 )
 
-// ValidationError separa "entrada malformada" (400) de "credencial errada"
-// (401) e de "falha interna" (500) sem o handler precisar inspecionar strings.
 type ValidationError struct{ Message string }
 
 func (e *ValidationError) Error() string { return e.Message }
 
 func NewValidationError(message string) error { return &ValidationError{Message: message} }
 
-// UserRepository e a porta de persistencia. Esta funcao so precisa de duas
-// operacoes: criar usuario e buscar por username. O CRUD administrativo de
-// `/users` ficou no oficina-mecanica-monolith.
-type UserRepository interface {
-	Create(ctx context.Context, user *domain.User) (*domain.User, error)
-	FindByUsername(ctx context.Context, username string) (*domain.User, error)
+type UserDirectory interface {
+	VerifyCredentials(ctx context.Context, username, password string) (*domain.User, error)
+	CreateUser(ctx context.Context, username, password string, role domain.UserRole) (*domain.User, error)
 }
 
 type AuthService interface {
@@ -39,12 +32,12 @@ type AuthService interface {
 }
 
 type authService struct {
-	repo         UserRepository
+	users        UserDirectory
 	jwtSecretKey string
 }
 
-func NewAuthService(repo UserRepository, jwtSecretKey string) AuthService {
-	return &authService{repo: repo, jwtSecretKey: jwtSecretKey}
+func NewAuthService(users UserDirectory, jwtSecretKey string) AuthService {
+	return &authService{users: users, jwtSecretKey: jwtSecretKey}
 }
 
 func (s *authService) Register(ctx context.Context, username, password string, role domain.UserRole) (*domain.User, error) {
@@ -60,21 +53,12 @@ func (s *authService) Register(ctx context.Context, username, password string, r
 
 	logger := observability.FromContext(ctx)
 
-	hash, err := hashPassword(password)
+	user, err := s.users.CreateUser(ctx, username, password, role)
 	if err != nil {
-		logger.ErrorContext(ctx, "hash password", observability.Err(err))
-		return nil, fmt.Errorf("hash password: %w", err)
-	}
-
-	user, err := s.repo.Create(ctx, &domain.User{
-		Username:     username,
-		PasswordHash: hash,
-		Role:         role,
-	})
-	if err != nil {
-		if !errors.Is(err, ErrUsernameTaken) {
+		var validation *ValidationError
+		if !errors.Is(err, ErrUsernameTaken) && !errors.As(err, &validation) {
 			logger.ErrorContext(ctx, "create user",
-				observability.Integration(observability.IntegrationRDS),
+				observability.Integration(observability.IntegrationOSService),
 				observability.Err(err))
 		}
 		return nil, err
@@ -90,27 +74,26 @@ func (s *authService) Register(ctx context.Context, username, password string, r
 func (s *authService) Login(ctx context.Context, username, password string) (string, error) {
 	logger := observability.FromContext(ctx)
 
-	user, err := s.repo.FindByUsername(ctx, username)
+	if username == "" || password == "" {
+		logger.WarnContext(ctx, "login failed: missing credentials",
+			observability.Event(observability.EventLoginFailed),
+			slog.String(observability.KeyUser, username))
+		return "", ErrInvalidCredentials
+	}
+
+	user, err := s.users.VerifyCredentials(ctx, username, password)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Mesma resposta de senha errada: nao revela quais usuarios existem.
-			logger.WarnContext(ctx, "login failed: unknown user",
+		if errors.Is(err, ErrInvalidCredentials) {
+			logger.WarnContext(ctx, "login failed: invalid credentials",
 				observability.Event(observability.EventLoginFailed),
 				slog.String(observability.KeyUser, username))
 			return "", ErrInvalidCredentials
 		}
 
-		logger.ErrorContext(ctx, "find user by username",
-			observability.Integration(observability.IntegrationRDS),
+		logger.ErrorContext(ctx, "verify credentials",
+			observability.Integration(observability.IntegrationOSService),
 			observability.Err(err))
 		return "", err
-	}
-
-	if err := verifyPassword(password, user.PasswordHash); err != nil {
-		logger.WarnContext(ctx, "login failed: wrong password",
-			observability.Event(observability.EventLoginFailed),
-			slog.String(observability.KeyUser, username))
-		return "", ErrInvalidCredentials
 	}
 
 	token, err := auth.GenerateToken(user.Username, string(user.Role), s.jwtSecretKey)

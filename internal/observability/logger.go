@@ -33,7 +33,7 @@ const (
 )
 
 const (
-	IntegrationRDS = "rds"
+	IntegrationOSService = "os-service"
 )
 
 func Setup() *slog.Logger {
