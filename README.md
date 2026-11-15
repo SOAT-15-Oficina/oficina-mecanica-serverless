@@ -227,6 +227,11 @@ Nenhum teste precisa de banco ou de rede: o cliente do OS Service é testado
 contra um `httptest.Server`. O CI barra cobertura abaixo de **80%** (sem `cmd/` e
 `tools/`, a mesma exclusão do SonarQube).
 
+**Evidência no CI:** [execução do PR #6 para
+`hml`](https://github.com/SOAT-15-Oficina/oficina-mecanica-serverless/actions/runs/43676753188).
+A aba *Summary* mostra o resumo do SonarQube publicado pelo job `quality`:
+Quality Gate, cobertura, bugs, vulnerabilidades e duplicação.
+
 ## Qualidade
 
 ```bash
