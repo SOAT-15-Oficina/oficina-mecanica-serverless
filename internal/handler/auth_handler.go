@@ -53,6 +53,7 @@ func (h *AuthHandler) Handle(ctx context.Context, req events.APIGatewayV2HTTPReq
 		slog.String(observability.KeyMethod, method),
 	)
 	ctx = observability.WithLogger(ctx, logger)
+	ctx = observability.WithRequestID(ctx, requestID)
 
 	resp, err := h.dispatch(ctx, req)
 
